@@ -1,0 +1,6 @@
+# Paths Semgrep should skip (same syntax as .gitignore).
+bin/
+obj/
+scan-results/
+zap/
+docs/

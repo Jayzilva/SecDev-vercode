@@ -1,0 +1,25 @@
+# Gitleaks configuration.
+# Start from the built-in rule set (~200 provider patterns + generic high-entropy rule)
+# and add project-specific rules / allowlists on top.
+title = "SecDev-vercode gitleaks config"
+
+[extend]
+useDefault = true
+
+# Extra rule: connection strings with an inline password (not in the default set).
+[[rules]]
+id = "connection-string-password"
+description = "Connection string containing a password"
+regex = '''(?i)(?:password|pwd)\s*=\s*([^;'"\s]{6,})'''
+secretGroup = 1
+keywords = ["password", "pwd"]
+
+# Allowlist example: ignore docs that explain secrets, and scan output folders.
+# In real projects prefer a narrow allowlist (exact path or fingerprint in .gitleaksignore)
+# over broad regexes, otherwise real leaks get hidden.
+[[allowlists]]
+description = "Documentation and generated reports"
+paths = [
+  '''^docs/''',
+  '''^scan-results/''',
+]

@@ -1,0 +1,87 @@
+# SCA — Software Composition Analysis.
+# Finds known CVEs in third-party packages (NuGet) and in the container image's OS packages.
+name: SCA
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 3 * * 1"   # weekly: new CVEs appear even when code does not change
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_VERSION: "10.0.x"
+  TRIVY_IMAGE: aquasec/trivy:0.76.2
+
+jobs:
+  nuget-audit:
+    name: dotnet list package --vulnerable
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+      - run: dotnet restore src/VulnApp/VulnApp.csproj --locked-mode   # fail if lock file is stale
+      - name: List vulnerable packages (direct + transitive)
+        run: |
+          mkdir -p scan-results
+          dotnet list src/VulnApp/VulnApp.csproj package --vulnerable --include-transitive \
+            --format json > scan-results/nuget-vulnerable.json
+          dotnet list src/VulnApp/VulnApp.csproj package --vulnerable --include-transitive \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+      # Gate example (disabled for the POC): fail if any High/Critical package exists.
+      # - run: |
+      #     if jq -e '[.projects[].frameworks[]?.topLevelPackages[]?.vulnerabilities[]?.severity] | any(. == "High" or . == "Critical")' scan-results/nuget-vulnerable.json; then
+      #       echo "::error::High/Critical vulnerable packages found"; exit 1; fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nuget-vulnerable
+          path: scan-results/nuget-vulnerable.json
+
+  trivy-fs:
+    name: Trivy (repository dependencies)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Trivy reads the committed packages.lock.json (RestorePackagesWithLockFile in the csproj),
+      # so no restore/build is needed. Without a lock file it only sees bin/*.deps.json after a build.
+      - name: Trivy filesystem scan
+        run: |
+          mkdir -p scan-results
+          docker run --rm -v "$PWD:/src" -w /src "$TRIVY_IMAGE" fs \
+            --scanners vuln --severity LOW,MEDIUM,HIGH,CRITICAL \
+            --format sarif --output scan-results/trivy-fs.sarif .
+      - uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        if: always()
+        with:
+          sarif_file: scan-results/trivy-fs.sarif
+          category: trivy-fs
+
+  trivy-image:
+    name: Trivy (container image)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: docker build -t vulnapp:ci .
+      - name: Trivy image scan (OS packages + .NET deps inside image)
+        run: |
+          mkdir -p scan-results
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD:/src" -w /src \
+            "$TRIVY_IMAGE" image --format sarif --output scan-results/trivy-image.sarif vulnapp:ci
+      - uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        if: always()
+        with:
+          sarif_file: scan-results/trivy-image.sarif
+          category: trivy-image

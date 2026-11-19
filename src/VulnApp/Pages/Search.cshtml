@@ -1,0 +1,12 @@
+@page
+@model VulnApp.Pages.SearchModel
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8" /><title>Search</title></head>
+<body>
+  <form method="get"><input name="q" value="@Model.Query" /><button>Search</button></form>
+  @* POC-VULN: CWE-79 — reflected XSS: Html.Raw disables Razor's automatic HTML encoding.
+     Try: /Search?q=<script>alert(1)</script> *@
+  <p>You searched for: @Html.Raw(Model.Query)</p>
+</body>
+</html>

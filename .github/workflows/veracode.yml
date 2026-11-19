@@ -1,0 +1,116 @@
+# Veracode — commercial SAST + SCA.
+# DISABLED until you have credentials. To enable:
+#   1. Repo Settings > Secrets and variables > Actions > Secrets:
+#        VERACODE_API_ID, VERACODE_API_KEY   (Veracode Platform > API Credentials)
+#        SRCCLR_API_TOKEN                    (Veracode SCA agent token, workspace > Agents)
+#   2. Variables: VERACODE_ENABLED = true
+# See docs/05-veracode-guide.md.
+name: Veracode
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_VERSION: "10.0.x"
+  APP_NAME: VulnApp-POC
+
+jobs:
+  package:
+    name: Package for Veracode
+    if: vars.VERACODE_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+      # Veracode scans compiled .NET assemblies. Requirements:
+      #  - Debug configuration (no optimisation) so line numbers map to source
+      #  - PDB files next to the DLLs
+      #  - framework-dependent publish (no need to upload the runtime)
+      - run: dotnet publish src/VulnApp/VulnApp.csproj -c Debug -o publish
+      - run: cd publish && zip -r ../vulnapp-veracode.zip .
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: veracode-package
+          path: vulnapp-veracode.zip
+
+  # Pipeline Scan: fast (minutes), no app profile, results only in the build. Use on every PR.
+  pipeline-scan:
+    name: Veracode Pipeline Scan
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: veracode-package
+      - uses: veracode/Veracode-pipeline-scan-action@7f47f30da5b5675f0362c7ddd904c714a8207940 # v1.0.25
+        with:
+          vid: ${{ secrets.VERACODE_API_ID }}
+          vkey: ${{ secrets.VERACODE_API_KEY }}
+          file: vulnapp-veracode.zip
+          fail_build: false               # POC: report only. Real gate: fail_on_severity: "Very High, High"
+          # baseline_file: veracode-baseline.json   # accept today's debt, fail only on NEW flaws
+      - name: Convert results to SARIF
+        uses: veracode/veracode-pipeline-scan-results-to-sarif@a968aed9d556a0af204bf6dc7f8f1884e19839bc # v2.0.5
+        with:
+          pipeline-results-json: filtered_results.json
+          output-results-sarif: veracode-results.sarif
+          source-base-path-1: "^.*/VulnApp/:src/VulnApp/"
+          noupload: true
+      - uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          sarif_file: veracode-results.sarif
+          category: veracode-pipeline
+
+  # Policy (Upload & Scan): full scan into an application profile, tracked over time,
+  # evaluated against your organisation's security policy. Use on main only.
+  policy-scan:
+    name: Veracode Policy Scan
+    needs: package
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: veracode-package
+      - uses: veracode/uploadandscan-action@91983ea6d3bf7742965d4771479d0a8344337389 # v0.2.4
+        with:
+          vid: ${{ secrets.VERACODE_API_ID }}
+          vkey: ${{ secrets.VERACODE_API_KEY }}
+          appname: ${{ env.APP_NAME }}
+          createprofile: true
+          version: ${{ github.run_id }}-${{ github.sha }}
+          filepath: vulnapp-veracode.zip
+          scantimeout: 0          # 0 = do not wait; results appear in the Veracode Platform
+          failbuild: false
+
+  # Veracode SCA agent: open-source dependency analysis (NuGet), can open GitHub issues.
+  sca:
+    name: Veracode SCA
+    if: vars.VERACODE_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+      - uses: veracode/veracode-sca@aeeb6aaa608a49195cab32c44b75db4f6a07a2df # v2.1.20
+        env:
+          SRCCLR_API_TOKEN: ${{ secrets.SRCCLR_API_TOKEN }}
+        with:
+          github_token: ${{ github.token }}
+          path: src/VulnApp
+          create-issues: false
+          breakBuildOnPolicyFindings: false
